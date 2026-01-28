@@ -173,6 +173,7 @@ fn generate_ngrams(
 }
 
 /// Main SGT implementation using simple iteration
+#[allow(clippy::too_many_arguments)]
 pub fn impl_sgt_transform(
     inputs: &[Series],
     kappa: i64,
