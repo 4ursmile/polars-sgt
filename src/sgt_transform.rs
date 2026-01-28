@@ -294,7 +294,7 @@ pub fn impl_sgt_transform(
     ).cast(&ngram_values_dtype)?;
 
     // Create struct
-    let struct_fields = vec![seq_id_series, ngram_keys_series, ngram_values_series];
+    let struct_fields = [seq_id_series, ngram_keys_series, ngram_values_series];
     Ok(StructChunked::from_series(
         PlSmallStr::from_str("sgt_result"),
         result_seq_ids.len(),

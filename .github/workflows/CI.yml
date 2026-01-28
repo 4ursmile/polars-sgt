@@ -14,9 +14,6 @@ name: polars-sgt CI
 
 on:
   push:
-    branches:
-      - main
-      - master
     tags:
       - "*"
   pull_request:
@@ -35,7 +32,7 @@ jobs:
     strategy:
       matrix:
         target: [x86_64]
-        python-version: ["3.9", "3.11", "3.13"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
