@@ -32,7 +32,7 @@ jobs:
     strategy:
       matrix:
         target: [x86_64]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.9", "3.11", "3.13"]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -175,15 +175,16 @@ jobs:
       attestations: write
     steps:
       - uses: actions/download-artifact@v5
+      - name: Merge wheels
+        run: |
+          mkdir -p dist
+          mv wheels-*/* dist/
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v3
         with:
-          subject-path: "wheels-*/*"
+          subject-path: "dist/*"
       - name: Publish to PyPI
         if: ${{ startsWith(github.ref, 'refs/tags/') }}
-        uses: PyO3/maturin-action@v1
-        env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          command: upload
-          args: --non-interactive --skip-existing wheels-*/*
+          skip-existing: true
