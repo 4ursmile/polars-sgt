@@ -76,6 +76,26 @@ features = result.select([
 ]).explode(["ngrams", "weights"])
 
 print(features)
+
+#OR 
+result = df.select(
+    sgt.sgt_transform(
+        "session_id",
+        "event",
+        time_col="time",
+        deltatime="m",  # minutes
+        kappa=3,  # trigrams
+        time_penalty="inverse",
+        mode="l2",
+        alpha=0.5
+    ).alias("struct_type")
+)
+out = (
+    result
+    .unnest("struct_type")
+    .explode(["ngram_keys", "ngram_values"])
+    .filter(pl.col("ngram_keys").str.split("->").list.len() > 0)
+)
 ```
 
 ### With DateTime Columns
