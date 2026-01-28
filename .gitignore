@@ -1,0 +1,12 @@
+/pyo3-polars/target
+.idea/
+venv/
+target/
+*.pyc
+.hypothesis/
+*.html
+*.bat
+*.js
+docs/_build
+docs/api/*
+*.so
