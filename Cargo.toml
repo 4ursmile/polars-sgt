@@ -1,6 +1,6 @@
 [package]
 name = "polars_sgt"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Zedd <lytran14789@gmail.com>", "Marco Gorelli <33491632+MarcoGorelli@users.noreply.github.com>"]
 
