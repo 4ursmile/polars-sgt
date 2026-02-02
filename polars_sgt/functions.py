@@ -740,7 +740,7 @@ def sgt_transform(
         Struct expression containing:
         - sequence_id: Original sequence identifier
         - ngram_keys: List of n-gram strings
-        - ngram_values: List of corresponding weights
+        - value: List of corresponding weights
 
     Examples
     --------
@@ -821,7 +821,7 @@ def sgt_transform(
     >>> df_features = result.select([
     ...     pl.col("sgt_result").struct.field("sequence_id"),
     ...     pl.col("sgt_result").struct.field("ngram_keys").alias("ngrams"),
-    ...     pl.col("sgt_result").struct.field("ngram_values").alias("weights"),
+    ...     pl.col("sgt_result").struct.field("value").alias("weights"),
     ... ]).explode(["ngrams", "weights"])
 
     Notes
@@ -855,5 +855,7 @@ def sgt_transform(
             "alpha": alpha,
             "beta": beta,
             "deltatime": deltatime,
+            "sequence_id_name": None,
+            "state_name": None,
         },
     )

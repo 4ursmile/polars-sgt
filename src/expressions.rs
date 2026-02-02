@@ -30,6 +30,8 @@ pub struct SgtTransformKwargs {
     alpha: f64,
     beta: f64,
     deltatime: Option<String>,
+    sequence_id_name: Option<String>,
+    state_name: Option<String>,
 }
 
 pub fn to_local_datetime_output(input_fields: &[Field]) -> PolarsResult<Field> {
@@ -122,7 +124,7 @@ fn sgt_transform_output(_input_fields: &[Field]) -> PolarsResult<Field> {
     let fields = vec![
         Field::new(PlSmallStr::from_str("sequence_id"), DataType::String),
         Field::new(PlSmallStr::from_str("ngram_keys"), DataType::List(Box::new(DataType::String))),
-        Field::new(PlSmallStr::from_str("ngram_values"), DataType::List(Box::new(DataType::Float64))),
+        Field::new(PlSmallStr::from_str("value"), DataType::List(Box::new(DataType::Float64))),
     ];
     Ok(Field::new(
         PlSmallStr::from_str("sgt_result"),
@@ -141,5 +143,7 @@ fn sgt_transform(inputs: &[Series], kwargs: SgtTransformKwargs) -> PolarsResult<
         kwargs.alpha,
         kwargs.beta,
         kwargs.deltatime.as_deref(),
+        kwargs.sequence_id_name.as_deref(),
+        kwargs.state_name.as_deref(),
     )
 }

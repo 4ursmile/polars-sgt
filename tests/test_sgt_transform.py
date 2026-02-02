@@ -113,7 +113,7 @@ def test_sgt_time_penalty_exponential() -> None:
     )
     
     weights = result.select(
-        pl.col("sgt").struct.field("ngram_values")
+        pl.col("sgt").struct.field("value")
     ).to_series().to_list()[0]
     
     # Weights should be positive
@@ -187,7 +187,7 @@ def test_sgt_time_penalty_none() -> None:
     
     # With no penalty, all weights should be integer counts
     weights = result.select(
-        pl.col("sgt").struct.field("ngram_values")
+        pl.col("sgt").struct.field("value")
     ).to_series().to_list()[0]
     
     assert all(w > 0 for w in weights)
@@ -210,7 +210,7 @@ def test_sgt_l1_normalization() -> None:
     )
     
     weights = result.select(
-        pl.col("sgt").struct.field("ngram_values")
+        pl.col("sgt").struct.field("value")
     ).to_series().to_list()[0]
     
     # L1 normalization: sum should be 1.0
@@ -234,7 +234,7 @@ def test_sgt_l2_normalization() -> None:
     )
     
     weights = result.select(
-        pl.col("sgt").struct.field("ngram_values")
+        pl.col("sgt").struct.field("value")
     ).to_series().to_list()[0]
     
     # L2 normalization: sum of squares should be 1.0
@@ -260,7 +260,7 @@ def test_sgt_length_sensitive() -> None:
     )
     
     weights = result.select(
-        pl.col("sgt").struct.field("ngram_values")
+        pl.col("sgt").struct.field("value")
     ).to_series().to_list()[0]
     
     # With length normalization, weights should be divided by sequence length
@@ -341,7 +341,7 @@ def test_sgt_struct_output() -> None:
     expanded = result.select([
         pl.col("sgt").struct.field("sequence_id").alias("seq_id"),
         pl.col("sgt").struct.field("ngram_keys").alias("keys"),
-        pl.col("sgt").struct.field("ngram_values").alias("values"),
+        pl.col("sgt").struct.field("value").alias("values"),
     ])
     
     assert "seq_id" in expanded.columns
@@ -372,7 +372,7 @@ def test_sgt_explode_pattern() -> None:
     exploded = result.select([
         pl.col("sgt").struct.field("sequence_id"),
         pl.col("sgt").struct.field("ngram_keys").alias("ngram"),
-        pl.col("sgt").struct.field("ngram_values").alias("weight"),
+        pl.col("sgt").struct.field("value").alias("weight"),
     ]).explode(["ngram", "weight"])
     
     assert exploded.shape[0] > 0

@@ -2019,6 +2019,7 @@ dependencies = [
  "polars-ops",
  "pyo3",
  "pyo3-polars",
+ "rayon",
  "serde",
 ]
 

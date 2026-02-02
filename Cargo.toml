@@ -18,4 +18,5 @@ chrono-tz = "0.10.4"
 polars = { version = "0.52.0", features = ["strings", "timezones"]}
 polars-ops = { version = "0.52.0", default-features = false }
 polars-arrow = { version = "0.52.0", default-features = false }
+rayon = "1.10"
 

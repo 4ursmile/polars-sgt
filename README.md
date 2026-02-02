@@ -72,7 +72,7 @@ result = df.select(
 features = result.select([
     pl.col("sgt_features").struct.field("sequence_id"),
     pl.col("sgt_features").struct.field("ngram_keys").alias("ngrams"),
-    pl.col("sgt_features").struct.field("ngram_values").alias("weights"),
+    pl.col("sgt_features").struct.field("value").alias("weights"),
 ]).explode(["ngrams", "weights"])
 
 print(features)
@@ -93,7 +93,7 @@ result = df.select(
 out = (
     result
     .unnest("struct_type")
-    .explode(["ngram_keys", "ngram_values"])
+    .explode(["ngram_keys", "value"])
     .filter(pl.col("ngram_keys").str.split("->").list.len() > 0)
 )
 ```
@@ -181,7 +181,7 @@ result = (
 Returns a Struct with three fields:
 - `sequence_id`: Original sequence identifier
 - `ngram_keys`: List of n-gram strings (e.g., "login -> view -> purchase")
-- `ngram_values`: List of corresponding weights
+- `value`: List of corresponding weights
 
 ## Additional DateTime Utilities
 

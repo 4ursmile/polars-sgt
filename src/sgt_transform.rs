@@ -1,10 +1,11 @@
-// Simplified SGT implementation that actually compiles
-// This implementation works correctly with POL ARS API patterns
+// High-performance SGT implementation optimized for 100M+ records
+// Uses group-based indexing (O(n)) and parallel processing with Rayon
 use polars::prelude::*;
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// Time penalty modes for SGT
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum TimePenalty {
     Inverse,
     Exponential,
@@ -25,6 +26,7 @@ impl TimePenalty {
         }
     }
 
+    #[inline(always)]
     pub fn apply(&self, time_diff: f64, alpha: f64, beta: f64) -> f64 {
         if time_diff == 0.0 {
             return 1.0;
@@ -40,7 +42,7 @@ impl TimePenalty {
 }
 
 /// Normalization modes for SGT
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum NormMode {
     L1,
     L2,
@@ -57,21 +59,22 @@ impl NormMode {
         }
     }
 
-    pub fn normalize(&self, weights: &mut HashMap<String, f64>) {
+    #[inline(always)]
+    pub fn normalize(&self, weights: &mut Vec<f64>) {
         match self {
             NormMode::L1 => {
-                let sum: f64 = weights.values().sum();
+                let sum: f64 = weights.iter().sum();
                 if sum > 0.0 {
-                    for weight in weights.values_mut() {
+                    for weight in weights.iter_mut() {
                         *weight /= sum;
                     }
                 }
             }
             NormMode::L2 => {
-                let sum_sq: f64 = weights.values().map(|w| w * w).sum();
+                let sum_sq: f64 = weights.iter().map(|w| w * w).sum();
                 if sum_sq > 0.0 {
                     let norm = sum_sq.sqrt();
-                    for weight in weights.values_mut() {
+                    for weight in weights.iter_mut() {
                         *weight /= norm;
                     }
                 }
@@ -82,6 +85,7 @@ impl NormMode {
 }
 
 /// Convert deltatime string to seconds multiplier
+#[inline(always)]
 fn deltatime_to_seconds(deltatime: Option<&str>) -> PolarsResult<f64> {
     match deltatime {
         None => Ok(1.0),
@@ -90,72 +94,105 @@ fn deltatime_to_seconds(deltatime: Option<&str>) -> PolarsResult<f64> {
         Some("h") => Ok(3600.0),
         Some("d") => Ok(86400.0),
         Some("w") => Ok(604800.0),
-        Some("month") => Ok(2629800.0), // 30.44 days
-        Some("q") => Ok(7889400.0),     // 91.31 days
-        Some("y") => Ok(31557600.0),    // 365.25 days
+        Some("month") => Ok(2629800.0),
+        Some("q") => Ok(7889400.0),
+        Some("y") => Ok(31557600.0),
         Some(other) => polars_bail!(InvalidOperation: "Unknown deltatime: {}", other),
     }
 }
 
-/// Extract time value as f64
-fn get_time_value(series: &Series, idx: usize, deltatime: Option<&str>) -> PolarsResult<Option<f64>> {
+/// Extract time values as f64 for a batch of indices
+#[inline]
+fn extract_time_values(
+    series: &Series,
+    indices: &[usize],
+    deltatime: Option<&str>,
+) -> PolarsResult<Vec<Option<f64>>> {
+    let divisor = deltatime_to_seconds(deltatime)?;
+    
     match series.dtype() {
-       DataType::Datetime(time_unit, _) => {
+        DataType::Datetime(time_unit, _) => {
             let ca = series.datetime()?;
-            let divisor = deltatime_to_seconds(deltatime)?;
             let time_unit_divisor = match time_unit {
                 TimeUnit::Nanoseconds => 1_000_000_000.0,
                 TimeUnit::Microseconds => 1_000_000.0,
                 TimeUnit::Milliseconds => 1_000.0,
             };
-            Ok(unsafe { ca.phys.get_unchecked(idx) }.map(|v| v as f64 / time_unit_divisor / divisor))
+            Ok(indices
+                .iter()
+                .map(|&i| unsafe { ca.phys.get_unchecked(i) }.map(|v| v as f64 / time_unit_divisor / divisor))
+                .collect())
         }
         DataType::Date => {
             let ca = series.date()?;
-            let divisor = deltatime_to_seconds(deltatime)? / 86400.0;
-           Ok(unsafe { ca.phys.get_unchecked(idx) }.map(|v| v as f64 / divisor))
+            let date_divisor = divisor / 86400.0;
+            Ok(indices
+                .iter()
+                .map(|&i| unsafe { ca.phys.get_unchecked(i) }.map(|v| v as f64 / date_divisor))
+                .collect())
         }
         DataType::Duration(time_unit) => {
             let ca = series.duration()?;
-            let divisor = deltatime_to_seconds(deltatime)?;
             let time_unit_divisor = match time_unit {
                 TimeUnit::Nanoseconds => 1_000_000_000.0,
                 TimeUnit::Microseconds => 1_000_000.0,
                 TimeUnit::Milliseconds => 1_000.0,
             };
-            Ok(unsafe { ca.phys.get_unchecked(idx) }.map(|v| v as f64 / time_unit_divisor / divisor))
+            Ok(indices
+                .iter()
+                .map(|&i| unsafe { ca.phys.get_unchecked(i) }.map(|v| v as f64 / time_unit_divisor / divisor))
+                .collect())
         }
         _ => {
             let ca = series.cast(&DataType::Float64)?;
-            Ok(ca.f64()?.get(idx))
+            let f64_ca = ca.f64()?;
+            Ok(indices.iter().map(|&i| f64_ca.get(i)).collect())
         }
     }
 }
 
-/// Generate n-grams with weights from a sequence
-fn generate_ngrams(
-    states: &[String],
+/// Result for a single sequence
+struct SequenceResult {
+    seq_id: String,
+    ngram_keys: Vec<String>,
+    ngram_values: Vec<f64>,
+}
+
+/// Generate n-grams with weights from a sequence (optimized version)
+#[inline]
+fn generate_ngrams_fast(
+    states: &[&str],
     time_values: &[Option<f64>],
     kappa: usize,
-    time_penalty: &TimePenalty,
+    time_penalty: TimePenalty,
     alpha: f64,
     beta: f64,
-) -> HashMap<String, f64> {
-    let mut ngram_weights: HashMap<String, f64> = HashMap::new();
-
+) -> (Vec<String>, Vec<f64>) {
     if states.is_empty() {
-        return ngram_weights;
+        return (Vec::new(), Vec::new());
     }
 
+    // Estimate capacity: n-grams up to kappa for sequence of length L
+    // Total n-grams ≈ L + (L-1) + ... + (L-kappa+1)
+    let estimated_capacity = states.len() * kappa.min(states.len());
+    let mut ngram_weights: HashMap<String, f64> = HashMap::with_capacity(estimated_capacity);
+
     // Generate n-grams up to kappa size
-    for n in 1..=kappa.min(states.len()) {
+    let max_n = kappa.min(states.len());
+    for n in 1..=max_n {
         for i in 0..=(states.len() - n) {
-            let ngram: Vec<&str> = states[i..i + n].iter().map(|s| s.as_str()).collect();
-            let ngram_key = ngram.join(" -> ");
+            // Build n-gram key efficiently
+            let ngram_key = if n == 1 {
+                states[i].to_string()
+            } else {
+                states[i..i + n].join(" -> ")
+            };
 
             // Calculate weight based on time difference
             let weight = if n > 1 && i + n - 1 < time_values.len() {
-                if let (Some(curr_time), Some(prev_time)) = (time_values[i + n - 1], time_values[i + n - 2]) {
+                if let (Some(curr_time), Some(prev_time)) = 
+                    (time_values[i + n - 1], time_values[i + n - 2])
+                {
                     let time_diff = (curr_time - prev_time).abs();
                     time_penalty.apply(time_diff, alpha, beta)
                 } else {
@@ -169,10 +206,76 @@ fn generate_ngrams(
         }
     }
 
-    ngram_weights
+    // Convert to sorted vectors
+    let mut keys: Vec<String> = ngram_weights.keys().cloned().collect();
+    keys.sort_unstable();
+    let values: Vec<f64> = keys.iter().map(|k| ngram_weights[k]).collect();
+    
+    (keys, values)
 }
 
-/// Main SGT implementation using simple iteration
+/// Process a single sequence group
+#[inline]
+fn process_sequence(
+    seq_id: &str,
+    indices: &[usize],
+    states_ca: &StringChunked,
+    time_series: Option<&Series>,
+    kappa: usize,
+    length_sensitive: bool,
+    time_penalty: TimePenalty,
+    norm_mode: NormMode,
+    alpha: f64,
+    beta: f64,
+    deltatime: Option<&str>,
+) -> PolarsResult<Option<SequenceResult>> {
+    // Extract states for this sequence using direct index access
+    let states: Vec<&str> = indices
+        .iter()
+        .filter_map(|&i| states_ca.get(i))
+        .collect();
+
+    if states.is_empty() {
+        return Ok(None);
+    }
+
+    // Extract time values
+    let time_values = if let Some(ts) = time_series {
+        extract_time_values(ts, indices, deltatime)?
+    } else {
+        // Use index positions as time
+        indices.iter().map(|&i| Some(i as f64)).collect()
+    };
+
+    // Generate n-grams with weights
+    let (keys, mut values) = generate_ngrams_fast(
+        &states,
+        &time_values,
+        kappa,
+        time_penalty,
+        alpha,
+        beta,
+    );
+
+    // Apply length normalization if requested
+    if length_sensitive && states.len() > 1 {
+        let seq_len = states.len() as f64;
+        for weight in values.iter_mut() {
+            *weight /= seq_len;
+        }
+    }
+
+    // Apply normalization mode
+    norm_mode.normalize(&mut values);
+
+    Ok(Some(SequenceResult {
+        seq_id: seq_id.to_string(),
+        ngram_keys: keys,
+        ngram_values: values,
+    }))
+}
+
+/// High-performance SGT implementation using group-based indexing and parallel processing
 #[allow(clippy::too_many_arguments)]
 pub fn impl_sgt_transform(
     inputs: &[Series],
@@ -183,6 +286,8 @@ pub fn impl_sgt_transform(
     alpha: f64,
     beta: f64,
     deltatime: Option<&str>,
+    sequence_id_name: Option<&str>,
+    state_name: Option<&str>,
 ) -> PolarsResult<Series> {
     if inputs.len() < 2 {
         polars_bail!(InvalidOperation: "sgt_transform requires at least sequence_id and state columns");
@@ -200,105 +305,89 @@ pub fn impl_sgt_transform(
     let time_penalty_mode = TimePenalty::from_str(time_penalty)?;
     let norm_mode = NormMode::from_str(mode)?;
 
-    // Get unique sequence IDs
-    let unique_ids: StringChunked = sequence_ids.str()?.unique()?.sort(Default::default());
-    
-    let mut result_seq_ids: Vec<String> = Vec::new();
-    let mut result_ngram_keys_list: Vec<Series> = Vec::new();
-    let mut result_ngram_values_list: Vec<Series> = Vec::new();
-
     let seq_ids_ca = sequence_ids.str()?;
     let states_ca = states_series.str()?;
 
-    // Process each unique sequence ID
-    for idx in 0..unique_ids.len() {
-        let seq_id: &str = match unique_ids.get(idx) {
-            Some(id) => id,
-            None => continue,
-        };
-
-        // Find all rows matching this sequence ID
-        let mask: BooleanChunked = seq_ids_ca.equal(seq_id);
-        
-        // Extract states for this sequence
-        let mut sequence_states = Vec::new();
-        let mut time_values = Vec::new();
-        
-        for i in 0..mask.len() {
-            if mask.get(i).unwrap_or(false) {
-                if let Some(state) = states_ca.get(i) {
-                    sequence_states.push(state.to_string());
-                    if let Some(ts) = time_series {
-                        time_values.push(get_time_value(ts, i, deltatime)?);
-                    } else {
-                        time_values.push(Some(i as f64));
-                    }
-                }
-            }
+    // OPTIMIZATION 1: Build group index in O(n) - single pass
+    // This replaces the O(n*m) nested loop
+    let mut groups: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (idx, seq_id) in seq_ids_ca.iter().enumerate() {
+        if let Some(id) = seq_id {
+            groups.entry(id).or_default().push(idx);
         }
-
-        if sequence_states.is_empty() {
-            continue;
-        }
-
-        // Generate n-grams with weights
-        let mut ngram_weights = generate_ngrams(
-            &sequence_states,
-            &time_values,
-            kappa,
-            &time_penalty_mode,
-            alpha,
-            beta,
-        );
-
-        // Apply length normalization if requested
-        if length_sensitive && sequence_states.len() > 1 {
-            let seq_len = sequence_states.len() as f64;
-            for weight in ngram_weights.values_mut() {
-                *weight /= seq_len;
-            }
-        }
-
-        // Apply normalization mode
-        norm_mode.normalize(&mut ngram_weights);
-
-        // Convert to sorted vectors
-        let mut keys: Vec<String> = ngram_weights.keys().cloned().collect();
-        keys.sort();
-        let values: Vec<f64> = keys.iter().map(|k| ngram_weights[k]).collect();
-
-        result_seq_ids.push(seq_id.to_string());
-        result_ngram_keys_list.push(
-            StringChunked::from_iter(keys.iter().map(|s| Some(s.as_str()))).into_series()
-        );
-        result_ngram_values_list.push(
-            Float64Chunked::from_vec(PlSmallStr::EMPTY, values).into_series()
-        );
     }
 
-    // Build result struct
-    let mut seq_id_ca = StringChunked::from_iter(result_seq_ids.iter().map(|s| Some(s.as_str())));
-    seq_id_ca.rename(PlSmallStr::from_str("sequence_id"));
-    let seq_id_series = seq_id_ca.into_series();
+    // OPTIMIZATION 2: Process groups in parallel with Rayon
+    let results: Vec<PolarsResult<Option<SequenceResult>>> = groups
+        .par_iter()
+        .map(|(seq_id, indices)| {
+            process_sequence(
+                seq_id,
+                indices,
+                states_ca,
+                time_series,
+                kappa,
+                length_sensitive,
+                time_penalty_mode,
+                norm_mode,
+                alpha,
+                beta,
+                deltatime,
+            )
+        })
+        .collect();
+
+    // Collect successful results
+    let mut result_seq_ids: Vec<String> = Vec::with_capacity(groups.len());
+    let mut result_ngram_keys_list: Vec<Series> = Vec::with_capacity(groups.len());
+    let mut result_ngram_values_list: Vec<Series> = Vec::with_capacity(groups.len());
+
+    for result in results {
+        if let Some(seq_result) = result? {
+            result_seq_ids.push(seq_result.seq_id);
+            result_ngram_keys_list.push(
+                StringChunked::from_iter(seq_result.ngram_keys.iter().map(|s| Some(s.as_str())))
+                    .into_series(),
+            );
+            result_ngram_values_list.push(
+                Float64Chunked::from_vec(PlSmallStr::EMPTY, seq_result.ngram_values).into_series(),
+            );
+        }
+    }
+
+    // Sort by sequence ID for deterministic output
+    let mut indexed: Vec<(usize, &String)> = result_seq_ids.iter().enumerate().collect();
+    indexed.sort_by(|a, b| a.1.cmp(b.1));
     
+    let sorted_seq_ids: Vec<String> = indexed.iter().map(|(i, _)| result_seq_ids[*i].clone()).collect();
+    let sorted_keys: Vec<Series> = indexed.iter().map(|(i, _)| result_ngram_keys_list[*i].clone()).collect();
+    let sorted_values: Vec<Series> = indexed.iter().map(|(i, _)| result_ngram_values_list[*i].clone()).collect();
+
+    // Use parameter names for struct fields (fallback to defaults)
+    let seq_field_name = sequence_id_name.unwrap_or("sequence_id");
+    let _state_field_name = state_name.unwrap_or("state"); // Reserved for future use
+
+    // Build result struct
+    let mut seq_id_ca = StringChunked::from_iter(sorted_seq_ids.iter().map(|s| Some(s.as_str())));
+    seq_id_ca.rename(PlSmallStr::from_str(seq_field_name));
+    let seq_id_series = seq_id_ca.into_series();
+
     // Convert to list series
     let ngram_keys_dtype = DataType::List(Box::new(DataType::String));
-    let ngram_keys_series = Series::new(
-        PlSmallStr::from_str("ngram_keys"),
-        result_ngram_keys_list
-    ).cast(&ngram_keys_dtype)?;
-    
+    let ngram_keys_series = Series::new(PlSmallStr::from_str("ngram_keys"), sorted_keys)
+        .cast(&ngram_keys_dtype)?;
+
+    // Renamed from ngram_values to value
     let ngram_values_dtype = DataType::List(Box::new(DataType::Float64));
-    let ngram_values_series = Series::new(
-        PlSmallStr::from_str("ngram_values"),
-        result_ngram_values_list
-    ).cast(&ngram_values_dtype)?;
+    let ngram_values_series = Series::new(PlSmallStr::from_str("value"), sorted_values)
+        .cast(&ngram_values_dtype)?;
 
     // Create struct
     let struct_fields = [seq_id_series, ngram_keys_series, ngram_values_series];
     Ok(StructChunked::from_series(
         PlSmallStr::from_str("sgt_result"),
-        result_seq_ids.len(),
-        struct_fields.iter()
-    )?.into_series())
+        sorted_seq_ids.len(),
+        struct_fields.iter(),
+    )?
+    .into_series())
 }
