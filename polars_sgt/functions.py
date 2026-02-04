@@ -893,14 +893,19 @@ def sgt_transform_df(
     group_name: str = "sgt_",
     use_tqdm: bool = True,
     keep_original_name: bool = True,
-) -> Union[pl.DataFrame, dict[Any, pl.DataFrame]]:
+) -> Union[pl.DataFrame, pl.LazyFrame]:
     """
     Apply SGT transform to a DataFrame, optionally grouped by columns.
+    
+    Returns a single DataFrame with sequence_id column(s) and SGT feature columns.
+    When group_cols is provided, features from each group are prefixed and joined
+    horizontally on the sequence_id column(s).
 
     Parameters
     ----------
     df
-        Input DataFrame or LazyFrame
+        Input DataFrame or LazyFrame. If LazyFrame, operations stay lazy until
+        necessary (only group values are collected for filtering).
     sequence_id_col
         Column(s) identifying sequences. If multiple columns are provided,
         they will be concatenated for processing and optionally restored.
@@ -910,14 +915,15 @@ def sgt_transform_df(
         Optional column containing timestamps
     group_cols
         Column(s) to group by before applying SGT.
-        If None, applies SGT to the whole DataFrame (or by existing sequence_id).
-        If provided, the DataFrame is split into subsets based on unique values of these columns.
+        If None, applies SGT to the whole DataFrame.
+        If provided, creates separate feature sets for each group, prefixed
+        with group values, and joins them into a single DataFrame.
     kappa
-        SGT kappa parameter
+        SGT kappa parameter (max n-gram size)
     length_sensitive
         SGT length_sensitive parameter
     mode
-        SGT mode parameter
+        SGT mode parameter ('l1', 'l2', 'none')
     time_penalty
         SGT time_penalty parameter
     alpha
@@ -927,7 +933,7 @@ def sgt_transform_df(
     deltatime
         SGT deltatime parameter
     group_name
-        Prefix for keys in the returned dictionary when group_cols is used.
+        Prefix for feature column names when group_cols is used.
     use_tqdm
         Whether to show a progress bar when iterating over groups.
     keep_original_name
@@ -936,23 +942,33 @@ def sgt_transform_df(
 
     Returns
     -------
-    Union[pl.DataFrame, dict[Any, pl.DataFrame]]
-        If group_cols is None, returns a single DataFrame with SGT features.
-        If group_cols is provided, returns a dictionary where keys map to group values
-        and values are DataFrames with SGT features.
+    Union[pl.DataFrame, pl.LazyFrame]
+        DataFrame with sequence_id column(s) and SGT feature columns.
+        Returns LazyFrame if input was LazyFrame and no group_cols specified.
     """
+    
+    # Track if input is lazy
+    is_lazy = isinstance(df, pl.LazyFrame)
     
     # Handle multiple sequence ID columns
     is_multi_seq = False
-    original_seq_cols = []
+    original_seq_cols: list[str] = []
     
     if isinstance(sequence_id_col, (list, tuple)) and not isinstance(sequence_id_col, str):
-         is_multi_seq = True
-         original_seq_cols = [str(c) for c in sequence_id_col]
+        is_multi_seq = True
+        original_seq_cols = [str(c) for c in sequence_id_col]
 
-    # If no grouping is requested, just run sgt_transform on the whole DF
-    if group_cols is None:
-        result = df.select(
+    # Determine the final ID col name for output
+    if is_multi_seq:
+        final_id_col = original_seq_cols[0] if keep_original_name else "sequence_id"
+    elif isinstance(sequence_id_col, str):
+        final_id_col = sequence_id_col
+    else:
+        final_id_col = "sequence_id"
+
+    def _apply_sgt_and_pivot(input_df: Union[pl.DataFrame, pl.LazyFrame], prefix: str = "") -> pl.DataFrame:
+        """Apply SGT transform, explode, pivot, and clean column names."""
+        result = input_df.select(
             sgt_transform(
                 sequence_id_col,
                 state_col,
@@ -967,6 +983,10 @@ def sgt_transform_df(
             ).alias("struct_type")
         )
         
+        # Collect if lazy for pivoting
+        if isinstance(result, pl.LazyFrame):
+            result = result.collect()
+        
         out = (
             result
             .unnest("struct_type")
@@ -974,38 +994,60 @@ def sgt_transform_df(
         )
         
         # Pivot to get features as columns
-        # Note: sequence_id in output is named "sequence_id" from the struct
-        df_sub = out.pivot(on="ngram_keys", index="sequence_id", values="value")
-        df_sub = clean_column_name(df_sub)
+        df_pivoted = out.pivot(on="ngram_keys", index="sequence_id", values="value")
+        
+        # Add prefix to feature columns (not sequence_id)
+        if prefix:
+            feature_cols = [c for c in df_pivoted.columns if c != "sequence_id"]
+            rename_map = {c: f"{prefix}{clean_name(c)}" for c in feature_cols}
+            df_pivoted = df_pivoted.rename(rename_map)
+        else:
+            df_pivoted = clean_column_name(df_pivoted)
+        
+        return df_pivoted
+    
+    def _restore_sequence_id_cols(result_df: pl.DataFrame) -> pl.DataFrame:
+        """Restore original sequence ID column names if needed."""
+        if not keep_original_name:
+            return result_df
+            
+        if is_multi_seq:
+            # Split "sequence_id" back into original cols
+            split_exprs = [
+                pl.col("sequence_id").str.split_exact("--", len(original_seq_cols) - 1)
+                .struct.field(f"field_{i}")
+                .alias(col_name)
+                for i, col_name in enumerate(original_seq_cols)
+            ]
+            result_df = result_df.with_columns(split_exprs).drop("sequence_id")
+        elif isinstance(sequence_id_col, str) and sequence_id_col != "sequence_id":
+            # Rename to original name
+            result_df = result_df.rename({"sequence_id": sequence_id_col})
+        
+        return result_df
 
-        if keep_original_name:
-             # Identify the sequence id column in the result
-             # It comes out as "sequence_id" from the struct
-             
-             if is_multi_seq:
-                 # Split the "sequence_id" column back into original cols
-                 # Assuming "--" separator as used in sgt_transform
-                 split_exprs = [
-                     pl.col("sequence_id").str.split_exact("--", len(original_seq_cols) - 1)
-                     .struct.field(f"field_{i}")
-                     .alias(col_name)
-                     for i, col_name in enumerate(original_seq_cols)
-                 ]
-                 df_sub = df_sub.with_columns(split_exprs).drop("sequence_id")
-             elif isinstance(sequence_id_col, str) and sequence_id_col != "sequence_id":
-                 # Rename back to original name if it's a single string col
-                 df_sub = df_sub.rename({"sequence_id": sequence_id_col})
-                 
-        return df_sub
+    # ========================
+    # Case 1: No group_cols
+    # ========================
+    if group_cols is None:
+        df_result = _apply_sgt_and_pivot(df)
+        df_result = _restore_sequence_id_cols(df_result)
+        return df_result
 
-    # If grouping is requested
+    # ========================
+    # Case 2: With group_cols
+    # ========================
     if isinstance(group_cols, str):
         group_cols = [group_cols]
 
     # Get unique combinations of group columns
-    subset_filters = df.select(group_cols).unique().to_dicts()
+    # Only collect the group column values (minimal data)
+    if is_lazy:
+        subset_filters = df.select(group_cols).unique().collect().to_dicts()
+    else:
+        subset_filters = df.select(group_cols).unique().to_dicts()
     
-    dfs = {}
+    result_dfs: list[pl.DataFrame] = []
     
     iterator = tqdm(subset_filters, desc=f"Calculate SGT for each sub df in {group_name}") if use_tqdm else subset_filters
 
@@ -1017,49 +1059,35 @@ def sgt_transform_df(
             filter_expr &= (pl.col(col_name) == val)
             key_parts.append(str(val))
         
-        key = f"{group_name}{'-'.join(key_parts)}"
+        # Create prefix from group values
+        prefix = f"{group_name}{'-'.join(key_parts)}_"
         
+        # Filter and apply SGT (keeps lazy if input is lazy)
         dfsub = df.filter(filter_expr)
         
-        result = dfsub.select(
-            sgt_transform(
-                sequence_id_col,
-                state_col,
-                time_col=time_col,
-                deltatime=deltatime,
-                kappa=kappa,
-                length_sensitive=length_sensitive,
-                mode=mode,
-                time_penalty=time_penalty,
-                alpha=alpha,
-                beta=beta,
-            ).alias("struct_type")
-        )
-
-        out = (
-            result
-            .unnest("struct_type")
-            .explode(["ngram_keys", "value"])
-            .with_columns(pl.lit(key).alias("kind"))
-        )
-        
-        # Pivot
-        df_sub = out.pivot(on="ngram_keys", index=["kind", "sequence_id"], values="value")
-        df_sub = clean_column_name(df_sub)
-        
-        if keep_original_name:
-             if is_multi_seq:
-                 # Split the "sequence_id" column back into original cols
-                 split_exprs = [
-                     pl.col("sequence_id").str.split_exact("--", len(original_seq_cols) - 1)
-                     .struct.field(f"field_{i}")
-                     .alias(col_name)
-                     for i, col_name in enumerate(original_seq_cols)
-                 ]
-                 df_sub = df_sub.with_columns(split_exprs).drop("sequence_id")
-             elif isinstance(sequence_id_col, str) and sequence_id_col != "sequence_id":
-                 df_sub = df_sub.rename({"sequence_id": sequence_id_col})
-
-        dfs[key] = df_sub
-        
-    return dfs
+        df_pivoted = _apply_sgt_and_pivot(dfsub, prefix=prefix)
+        result_dfs.append(df_pivoted)
+    
+    # Reduce: join all DataFrames on sequence_id
+    if not result_dfs:
+        # Edge case: no groups found
+        return pl.DataFrame()
+    
+    from functools import reduce
+    
+    def join_on_seq_id(left: pl.DataFrame, right: pl.DataFrame) -> pl.DataFrame:
+        # Get all columns from right except sequence_id (which we join on)
+        return left.join(right, on="sequence_id", how="outer_coalesce")
+    
+    final_df = reduce(join_on_seq_id, result_dfs)
+    
+    # Fill nulls with 0 for feature columns (n-grams not present in some groups)
+    feature_cols = [c for c in final_df.columns if c != "sequence_id"]
+    final_df = final_df.with_columns([
+        pl.col(c).fill_null(0.0) for c in feature_cols
+    ])
+    
+    # Restore original sequence ID column names
+    final_df = _restore_sequence_id_cols(final_df)
+    
+    return final_df

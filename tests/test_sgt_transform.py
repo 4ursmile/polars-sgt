@@ -404,3 +404,47 @@ def test_sgt_with_date_column() -> None:
     )
     
     assert result.shape[0] == 1
+
+
+def test_sgt_kappa3_uses_all_time_transitions() -> None:
+    """Verify kappa>2 uses all time transitions, not just last two."""
+    df = pl.DataFrame({
+        "id": ["1", "1", "1"],
+        "state": ["A", "B", "C"],
+        "time": [0, 1, 10],  # A→B: diff=1, B→C: diff=9
+    })
+    
+    result = df.select(
+        xdt.sgt_transform(
+            "id",
+            "state",
+            time_col="time",
+            kappa=3,
+            time_penalty="inverse",
+            alpha=1.0,
+            mode="none",
+        ).alias("sgt")
+    )
+    
+    # Extract ngrams and weights
+    ngrams = result.select(
+        pl.col("sgt").struct.field("ngram_keys")
+    ).to_series().to_list()[0]
+    
+    weights = result.select(
+        pl.col("sgt").struct.field("value")
+    ).to_series().to_list()[0]
+    
+    # Find trigram and bigram weights
+    trigram_idx = ngrams.index("A -> B -> C")
+    ab_idx = ngrams.index("A -> B")
+    bc_idx = ngrams.index("B -> C")
+    
+    trigram_weight = weights[trigram_idx]
+    ab_weight = weights[ab_idx]  # alpha/1 = 1.0
+    bc_weight = weights[bc_idx]  # alpha/9 ≈ 0.111
+    
+    # Trigram weight should be product of both transition weights
+    expected_trigram = ab_weight * bc_weight
+    assert abs(trigram_weight - expected_trigram) < 1e-10
+

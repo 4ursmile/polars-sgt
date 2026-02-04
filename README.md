@@ -2,39 +2,38 @@
 
 ## Sequence Graph Transform for Polars
 
-
-
 [![PyPI version](https://badge.fury.io/py/polars-sgt.svg)](https://badge.fury.io/py/polars-sgt)
 
 Transform sequential data into powerful n-gram representations with [Polars](https://www.pola.rs/).
 
 **polars-sgt** brings Sequence Graph Transform (SGT) to Polars, enabling you to:
-- ✅ Transform sequences into weighted n-gram features
-- ✅ Capture temporal patterns with time-based weighting
-- ✅ Apply flexible normalization strategies (L1, L2, or none)
-- ✅ Handle datetime, date, duration, and numeric time columns
-- ✅ Blazingly fast, written in Rust
-- ✅ Compatible with Polars lazy evaluation and streaming
+- ✅ **Transform** sequences into weighted n-gram features
+- ✅ **Grouped Analysis**: Apply SGT across subsets (e.g., by direction, metric) and merge into a single wide DataFrame
+- ✅ **Billion-Row Scale**: Optimized Rust implementation with O(1) time weight lookups
+- ✅ **Temporal Dynamics**: Capture patterns with multiple decay functions across all n-gram transitions
+- ✅ **Flexible**: Support for datetime, date, duration, and numeric time columns
+- ✅ **Lazy & Parallel**: Fully compatible with Polars lazy evaluation and Rayon-backed parallel processing
 
 ## What is SGT?
 
-Sequence Graph Transform converts sequential data (like user clickstreams, sensor readings, or transaction histories) into weighted n-gram representations. It captures:
+Sequence Graph Transform converts sequential data (like user clickstreams, sensor readings, or transaction histories) into weighted n-gram representations. Unlike traditional n-grams, SGT captures:
 
-- **Sequential patterns**: Unigrams, bigrams, trigrams, and higher-order n-grams
-- **Temporal dynamics**: Time-based weighting with multiple decay functions
-- **Normalized features**: L1/L2 normalization for comparable feature spaces
+- **Sequential patterns**: Multi-transition dependencies (Unigrams, bigrams, trigrams...)
+- **Temporal dynamics**: Weights decay based on time gaps between events.
+- **Normalized features**: L1/L2 normalization for machine-learning-ready feature spaces.
 
-Perfect for:
-- User behavior analysis
-- Time series feature engineering
-- Sequential pattern mining
-- Anomaly detection in sequences
+---
+
+## Performance at Scale
+
+Optimized for processing billions of rows:
+- **O(1) Weight Calculation**: Uses cumulative product prefix arrays to calculate multi-transition time weights in constant time.
+- **Zero-Cost Abstraction**: Written in Rust with Rayon for automatic multi-core utilization.
+- **Memory Efficient**: Leverages Polars' arrow-backed memory management.
+
+---
 
 ## Installation
-
-
-
-Then install `polars-sgt`:
 
 ```console
 pip install polars-sgt
@@ -42,60 +41,74 @@ pip install polars-sgt
 
 ## Quick Start
 
-### Basic Example
+### 1. High-Level API: `sgt_transform_df`
 
+The `sgt_transform_df` function is the easiest way to generate SGT features. It handles unnesting, exploding, and pivoting into a wide format automatically.
+
+#### Single Group (Default)
 ```python
 import polars as pl
 import polars_sgt as sgt
 
-# User clickstream data
 df = pl.DataFrame({
-    "user_id": [1, 1, 1, 2, 2, 2],
-    "action": ["login", "view_product", "purchase", "login", "view_product", "logout"],
-    "timestamp": [0, 10, 20, 0, 5, 15],
+    "user_id": ["A", "A", "A", "B", "B"],
+    "action": ["login", "view", "purchase", "login", "view"],
+    "time": [1, 2, 10, 1, 5],
 })
 
-# Generate bigrams with exponential time decay
+# Generate wide-format features merged into one DataFrame
+features = sgt.sgt_transform_df(
+    df, 
+    sequence_id_col="user_id", 
+    state_col="action", 
+    time_col="time",
+    kappa=2
+)
+```
+
+#### Grouped Sequence Analysis
+Calculate separate SGT features for different groups (e.g., event types or directions) and merge them into one wide DataFrame.
+
+```python
+# Calculate SGT features for each 'direction' and 'metric'
+result = sgt.sgt_transform_df(
+    df,
+    sequence_id_col="user_id",
+    state_col="action",
+    time_col="time",
+    group_cols=["direction", "metric"],
+    kappa=3,
+    time_penalty="exponential",
+    alpha=0.7,
+    group_name="analysis"
+)
+# Columns: ['user_id', 'analysis-buy-p_login', 'analysis-sell-p_login', ...]
+```
+
+### 2. Expression API: `sgt_transform`
+
+For more control or integration into complex pipelines, use the expression-based API.
+
+```python
+# Basic expression usage (returns a struct)
 result = df.select(
     sgt.sgt_transform(
         "user_id",
         "action",
-        time_col="timestamp",
-        kappa=2,  # bigrams
+        time_col="time",
+        kappa=2,
         time_penalty="exponential",
         alpha=0.1,
-        mode="l1"  # L1 normalization
+        mode="l1"
     ).alias("sgt_features")
 )
 
-# Extract features
+# Extract and explode
 features = result.select([
     pl.col("sgt_features").struct.field("sequence_id"),
     pl.col("sgt_features").struct.field("ngram_keys").alias("ngrams"),
     pl.col("sgt_features").struct.field("value").alias("weights"),
 ]).explode(["ngrams", "weights"])
-
-print(features)
-
-#OR 
-result = df.select(
-    sgt.sgt_transform(
-        "session_id",
-        "event",
-        time_col="time",
-        deltatime="m",  # minutes
-        kappa=3,  # trigrams
-        time_penalty="inverse",
-        mode="l2",
-        alpha=0.5
-    ).alias("struct_type")
-)
-out = (
-    result
-    .unnest("struct_type")
-    .explode(["ngram_keys", "value"])
-    .filter(pl.col("ngram_keys").str.split("->").list.len() > 0)
-)
 ```
 
 ### With DateTime Columns
@@ -119,9 +132,8 @@ result = df.select(
         "session_id",
         "event",
         time_col="time",
-        deltatime="m",  # minutes
-        kappa=3,  # trigrams
-        time_penalty="inverse",
+        deltatime="m",  # unit: minutes
+        kappa=3,
     )
 )
 ```
@@ -141,64 +153,42 @@ result = (
             deltatime="h",
         )
     )
-    .collect(streaming=True)
+    .collect(engine="streaming")
 )
 ```
 
-## Parameters
+---
 
-### Required
-- `sequence_id_col`: Column with sequence identifiers (groups)
-- `state_col`: Column with state/event values
+## API Reference
 
-### Optional
-- `time_col`: Timestamp column (datetime, date, duration, or numeric)
-- `kappa`: Maximum n-gram size (default: 1)
-  - 1 = unigrams only
-  - 2 = unigrams + bigrams
-  - 3 = unigrams + bigrams + trigrams, etc.
-  
-- `time_penalty`: Time decay function (default: "inverse")
-  - `"inverse"`: weight = alpha / time_diff
-  - `"exponential"`: weight = exp(-alpha × time_diff)
-  - `"linear"`: weight = max(0, 1 - alpha × time_diff)
-  - `"power"`: weight = 1 / time_diff^beta
-  - `"none"`: No time penalty
+### `sgt.sgt_transform_df`
+The recommended high-level entry point. Returns a wide-format DataFrame.
 
-- `mode`: Normalization mode (default: "l1")
-  - `"l1"`: Sum of weights = 1
-  - `"l2"`: L2 norm = 1
-  - `"none"`: No normalization
+- `df`: Input DataFrame or LazyFrame.
+- `sequence_id_col`: Column(s) identifying sequences.
+- `state_col`: Column containing states/events.
+- `time_col`: Optional timestamp column.
+- `group_cols`: Optional column(s) to group by before SGT.
+- `kappa`: Maximum n-gram size.
+- `mode`: Normalization (`"l1"`, `"l2"`, `"none"`).
+- `time_penalty`: Decay function (`"inverse"`, `"exponential"`, `"linear"`, `"power"`, `"none"`).
 
-- `length_sensitive`: Apply length normalization (default: False)
-- `alpha`: Time penalty scale parameter (default: 1.0)
-- `beta`: Power parameter for "power" penalty (default: 2.0)
-- `deltatime`: Time unit for datetime columns
-  - `"s"`, `"m"`, `"h"`, `"d"`, `"w"`, `"month"`, `"q"`, `"y"`
+### `sgt.sgt_transform` (Expression)
+Returns a struct with `sequence_id`, `ngram_keys`, and `value`.
 
-## Output
+```python
+df.select(
+    sgt.sgt_transform("user", "action", kappa=2).alias("sgt")
+).unnest("sgt")
+```
 
-Returns a Struct with three fields:
-- `sequence_id`: Original sequence identifier
-- `ngram_keys`: List of n-gram strings (e.g., "login -> view -> purchase")
-- `value`: List of corresponding weights
-
-## Additional DateTime Utilities
-
-While SGT is the primary focus, polars-sgt also includes helpful datetime utilities from the original polars-xdt:
-- Timezone conversions
-- Localized date formatting  
-- Julian date conversion
-- Month delta calculations
-
-See the [full API documentation](https://github.com/Zedd-L/polars-sgt) for details.
+---
 
 ## Author & Acknowledgments
 
 **Author:** Zedd (lytran14789@gmail.com)
 
-**Special Thanks:** This project is built upon [polars-xdt](https://github.com/MarcoGorelli/polars-xdt) 
-created by [Marco Gorelli](https://github.com/MarcoGorelli). We are grateful for his excellent foundation.
+**Special Thanks:** Built upon [polars-xdt](https://github.com/MarcoGorelli/polars-xdt) by [Marco Gorelli](https://github.com/MarcoGorelli).
 
 ## License
 

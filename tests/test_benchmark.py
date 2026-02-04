@@ -148,7 +148,7 @@ class TestScalability:
         result = (
             large_dataset.lazy()
             .select(sgt_transform("seq_id", "state", kappa=2))
-            .collect(streaming=True)
+            .collect(engine="streaming")
         )
         
         assert result.shape[0] == 10000
