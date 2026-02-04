@@ -11,6 +11,7 @@ from polars_sgt.functions import (
     month_delta,
     month_name,
     sgt_transform,
+    sgt_transform_df,
     to_julian_date,
     to_local_datetime,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "month_delta",
     "month_name",
     "sgt_transform",
+    "sgt_transform_df",
     "to_julian_date",
     "to_local_datetime",
 ]
