@@ -161,46 +161,48 @@ result = (
 
 ## API Reference
 
-### `sgt.sgt_transform_df`
-The recommended high-level entry point. Automatically handles unnesting and pivoting into a wide-format DataFrame.
+The following parameters are shared by both `sgt_transform_df` and the `sgt_transform` expression.
 
-**Parameters:**
-- `df`: Input Polars `DataFrame` or `LazyFrame`.
-- `sequence_id_col`: String or list of strings. Identifies unique sequences (e.g., `user_id`). Multiple columns are concatenated for processing and can be restored in the output.
-- `state_col`: String. Column containing the elements of the sequence (e.g., `action`).
-- `time_col`: Optional string. Column containing timestamps or numeric time values.
-- `group_cols`: Optional string or list of strings. Subsets to split data before applying SGT (e.g., `direction`, `metric`). Features from each group are prefixed and merged into a single wide DataFrame.
-- `kappa`: Integer (default=`1`). Maximum n-gram length to consider. `kappa=1` for unigrams, `2` for bigrams, etc.
-- `mode`: String (default=`"l1"`). Normalization strategy:
-    - `"l1"`: Sum of weights equals 1.
-    - `"l2"`: Euclidean norm of weights equals 1.
-    - `"none"`: Raw cumulative weights.
-- `time_penalty`: String (default=`"inverse"`). Decay function for temporal weighting:
-    - `"inverse"`: `alpha / time_diff`
-    - `"exponential"`: `exp(-alpha * time_diff)`
-    - `"linear"`: `max(0, 1 - alpha * time_diff)`
-    - `"power"`: `1 / time_diff^beta`
-    - `"none"`: Ignores time intervals.
-- `alpha`: Float (default=`1.0`). Scaling/decay rate for time penalties.
-- `beta`: Float (default=`2.0`). Exponent for the `"power"` penalty.
-- `deltatime`: String. Unit for temporal columns: `"s"`, `"m"`, `"h"`, `"d"`, `"w"`, `"month"`, `"q"`, `"y"`.
-- `group_name`: String (default=`"sgt_"`). Prefix used for feature columns when `group_cols` is provided.
-- `use_tqdm`: Boolean (default=`True`). Enable/disable progress bar during computation.
-- `keep_original_name`: Boolean (default=`True`). Restore original column names if `sequence_id_col` was a list.
-- `length_sensitive`: Boolean (default=`False`). Normalize weights by sequence length.
+### Required
+- `sequence_id_col`: Column with sequence identifiers (groups).
+- `state_col`: Column with state/event values.
 
-**Returns:**
-- A wide `pl.DataFrame` containing sequence ID columns and n-gram feature columns.
+### Optional
+- `time_col`: Timestamp column (datetime, date, duration, or numeric).
+- `group_cols`: Optional column(s) to group by before SGT (exclusive to `sgt_transform_df`).
+- `kappa`: Maximum n-gram size (default: 1)
+  - 1 = unigrams only
+  - 2 = unigrams + bigrams
+  - 3 = unigrams + bigrams + trigrams, etc.
+  
+- `time_penalty`: Time decay function (default: "inverse")
+  - `"inverse"`: weight = alpha / time_diff
+  - `"exponential"`: weight = exp(-alpha × time_diff)
+  - `"linear"`: weight = max(0, 1 - alpha × time_diff)
+  - `"power"`: weight = 1 / time_diff^beta
+  - `"none"`: No time penalty
+
+- `mode`: Normalization mode (default: "l1")
+  - `"l1"`: Sum of weights = 1
+  - `"l2"`: L2 norm = 1
+  - `"none"`: No normalization
+
+- `length_sensitive`: Apply length normalization (default: False).
+- `alpha`: Time penalty scale parameter (default: 1.0).
+- `beta`: Power parameter for "power" penalty (default: 2.0).
+- `deltatime`: Time unit for datetime columns
+  - `"s"`, `"m"`, `"h"`, `"d"`, `"w"`, `"month"`, `"q"`, `"y"`
+- `group_name`: Prefix for feature columns (default: `"sgt_"`).
+- `use_tqdm`: Whether to show a progress bar (default: `True`).
+- `keep_original_name`: Restore original column names for multiple sequence IDs (default: `True`).
 
 ---
 
+### `sgt.sgt_transform_df`
+The recommended high-level entry point. Automatically handles unnesting and pivoting into a wide-format DataFrame. Returns a `pl.DataFrame`.
+
 ### `sgt.sgt_transform` (Expression)
-Polars plugin expression for use within `select`, `with_columns`, or `group_by`.
-
-**Parameters:**
-Identical to `sgt_transform_df`, but returns a `pl.Struct` column.
-
-**Output Struct Fields:**
+Polars plugin expression for use within `select`, `with_columns`, or `group_by`. Returns a `pl.Struct` with fields:
 - `sequence_id`: Identifier for the sequence.
 - `ngram_keys`: List of n-gram labels (e.g., `"A -> B"`).
 - `value`: List of corresponding n-gram weights.
@@ -210,6 +212,9 @@ df.select(
     sgt.sgt_transform("user", "action", kappa=2).alias("sgt")
 ).unnest("sgt")
 ```
+
+---
+
 
 ---
 
