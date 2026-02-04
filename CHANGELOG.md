@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-02-04
+
+### Added
+- `use_tqdm` parameter to `sgt_transform_df` to control progress bar visibility.
+- `keep_original_name` parameter to `sgt_transform_df` to optionally restore original sequence ID names.
+- Support for multiple columns in `sequence_id_col` in `sgt_transform_df` (automatically concatenates and splits).
+
+### Fixed
+- `sgt_transform_df` now correctly handles `group_cols=None` by processing the entire DataFrame.
+- `sgt_transform_df` now correctly filters subsets dynamically based on unique values of `group_cols` instead of hardcoded columns.
+
 ## [0.2.0] - 2026-02-02
 
 ### Added
